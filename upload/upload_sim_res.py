@@ -13,14 +13,14 @@ def upload_to_gcs(local_file: Path):
     print(f"Uploaded {local_file} to GCS")
 
 
-def download_from_gcs(blob_name: str, save_path: Path):
+def download_from_gcs(blob_name: str, save_dir: Path):
     """Downloads a file from Google Cloud Storage"""
     bucket = client.bucket(bucket_name)
     print(bucket)
     blob = bucket.blob(blob_name)
     print(blob)
-    blob.download_to_filename(str(save_path))
-    print(f"Downloaded {blob_name} to {save_path}")
+    blob.download_to_filename(str(save_dir + Path(blob_name).name))
+    print(f"Downloaded {blob_name} to {save_dir}")
 
 
 def show_blob_info(blob):
@@ -34,7 +34,7 @@ def download_blobs(blob_names:list[str] = None, save_dir=None, start_from = 0):
         print(f"Downloading {len(blob_names[start_from:])} blobs from {bucket_name}")
 
     for i, blob_name in enumerate(tqdm(blob_names[start_from:])):
-        download_from_gcs(blob_name, save_dir + Path(blob_name).name)
+        download_from_gcs(blob_name, save_dir)
         print(f"Downloaded blob {i+1} of {len(blob_names[start_from:])}: {Path(blob_name).name}")
         
 def list_blob_names():

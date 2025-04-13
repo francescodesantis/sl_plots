@@ -25,9 +25,16 @@ from cochleas.consts import CFMAX, CFMIN
 from utils.custom_sounds import Tone, ToneBurst
 
 plt.rcParams["axes.grid"] = True
-plt.rcParams['axes.titlesize']= 'large'
+plt.rcParams['axes.titlesize'] = 20
+plt.rcParams['axes.titleweight']= 'bold'
 plt.rcParams['axes.spines.right']= False
 plt.rcParams['axes.spines.top']= False
+plt.rcParams['axes.labelsize'] = 14    # Size of axis labels (x and y labels)
+plt.rcParams['xtick.labelsize'] = 12   # Size of x-axis tick labels
+plt.rcParams['ytick.labelsize'] = 12   # Size of y-axis tick labels
+plt.rcParams['legend.fontsize'] = 12   # Size of the legend text
+# Make axis labels bold
+plt.rcParams['axes.labelweight'] = 'bold'  # Makes x and y axis labels bold
 
 
 def flatten(items):
@@ -395,13 +402,15 @@ def calculate_vector_strength_from_result(
         bandwidth=0,
         n_bins = 7,
         figsize = (7,5),
-        display=False # if True also return fig, show() in caller function
+        display=False, # if True also return fig, show() in caller function
+        x_ax = "phase"  # can be "phase" or "time"
         ):
     
     spikes = res["angle_to_rate"][angle][side][pop]
     sender2times = defaultdict(list)
     for sender, time in zip(spikes["senders"], spikes["times"]):
-        sender2times[sender].append(time)
+        if time <= 1000:
+            sender2times[sender].append(time)
     sender2times = {k: np.array(v) / 1000 for k, v in sender2times.items()}
     num_neurons = len(spikes["global_ids"])
     cf = erbspace(CFMIN, CFMAX, num_neurons)
@@ -415,9 +424,9 @@ def calculate_vector_strength_from_result(
         freq = freq * Hz
 
     if(cf_target == None):    
-        cf_neuron, center_neuron_for_freq = take_closest(cf, freq)
+        _, center_neuron_for_freq = take_closest(cf, freq)
     else:
-        cf_neuron, center_neuron_for_freq = take_closest(cf, cf_target *Hz)
+        _, center_neuron_for_freq = take_closest(cf, cf_target *Hz)
 
     old2newid = {oldid: i for i, oldid in enumerate(spikes["global_ids"])}
     new2oldid = {v: k for k, v in old2newid.items()}
@@ -444,23 +453,41 @@ def calculate_vector_strength_from_result(
         if side == 'L': color = 'm'
         elif side == 'R': color = 'g'
         else: color = 'k'
-    # plot phases
-    bins = np.linspace(0, 2 * np.pi, n_bins + 1)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-
+    
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    hist1, _ = np.histogram(phases, bins=bins)
-    ax.bar(bin_centers, hist1, width=2 * np.pi / n_bins, alpha=0.7, color = color)
-    # if(bandwidth == 0):
-    #     ax.set_title(
-    #         f"Neuron {relevant_neurons_ids[0]} (CF: {cf_neuron:.1f} Hz)\nVS={vs:.3f}"
-    #     )
-    # else:
-    #     ax.set_title(
-    #         f"Neurons {relevant_neurons_ids[0]} : {relevant_neurons_ids[-1]} (center CF: {cf_neuron:.1f} Hz)\nVS={vs:.3f}"
-    #     )
-    ax.set_title(f"{freq}\nR={vs:.3f}")
-    ax.set_xlabel("Phase (radians)")
+    
+    if x_ax == "phase":
+        # Plot in phase mode with pi unit labels
+        bins = np.linspace(0, 2 * np.pi, n_bins + 1)
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        
+        hist1, _ = np.histogram(phases, bins=bins)
+        ax.bar(bin_centers, hist1, width=2 * np.pi / n_bins, alpha=0.7, color=color)
+        
+        # Set x-ticks in terms of π
+        pi_ticks = np.array([0, 0.5, 1, 1.5, 2]) * np.pi
+        pi_labels = ['0', 'π/2', 'π', '3π/2', '2π']
+        ax.set_xticks(pi_ticks)
+        ax.set_xticklabels(pi_labels)
+        
+        ax.set_xlabel("Phase")
+        
+    elif x_ax == "time":
+        # Convert phases to time in milliseconds
+        period_ms = 1000 / (freq / Hz)  # Period in milliseconds
+        time_values = (phases / (2 * np.pi)) * period_ms
+        
+        # Create time bins
+        time_bins = np.linspace(0, period_ms, n_bins + 1)
+        time_bin_centers = (time_bins[:-1] + time_bins[1:]) / 2
+        
+        hist1, _ = np.histogram(time_values, bins=time_bins)
+        ax.bar(time_bin_centers, hist1, width=period_ms / n_bins, alpha=0.7, color=color)
+        
+        ax.set_xlabel("Time [ms]")
+    
+    #ax.set_title(f"{int(freq / Hz)} Hz\nR={vs:.3f}")
+    ax.set_title(f"R={vs:.3f}")
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
     plt.show()
@@ -558,7 +585,7 @@ def draw_spikes_pop(
     angle,
     side,
     pop,
-    y_ax = 'ids',
+    y_ax = 'cf_custom',
     f_ticks = [100,1000,10000],
     title=None,
     xlim=None,
@@ -581,25 +608,25 @@ def draw_spikes_pop(
         xlim_array = [0,duration]
     else: xlim_array = xlim
 
-    if y_ax == 'ids':
+    if y_ax == 'global_ids':
         y_values = spikes['senders']
-        ylabel = "id_senders"
+        ylabel = f"{pop} global IDS"
     elif y_ax == 'cf':
         y_values = np.array([neuron_to_cf[sender] for sender in spikes["senders"]])
-        ylabel = "Characteristic Frequency [Hz]"
-    elif y_ax == 'global_ids':
+        ylabel = f"{pop} CF [Hz]"
+    elif y_ax == 'ids':
         y_values = spikes['senders'] - spikes['global_ids'][0]
-        ylabel = "Global Neuron IDs"
+        ylabel = f"{pop} IDS"
     elif y_ax == 'cf_custom':
         y_values = spikes['senders'] - spikes['global_ids'][0]
-        ylabel = "Characteristic Frequency"
+        ylabel = f"{pop} CF [Hz]"
         label_indexes = np.zeros_like(f_ticks)
         for i, f in enumerate(f_ticks):
             l, label_indexes[i] = take_closest(cf, f*Hz)
         ax.set_yticks(label_indexes)
         ax.set_yticklabels(f_ticks*Hz) 
     else:
-        raise ValueError("Invalid value for 'ax'. Choose 'ids', 'cf', or 'global_ids'.")
+        raise ValueError("Invalid value for 'ax'. Choose 'cf_custom', 'ids', 'cf', or 'global_ids'.")
 
     ax.plot(spikes['times'], y_values, '.', color = color, markersize=1)
     ax.set_title(title)
