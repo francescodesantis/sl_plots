@@ -68,7 +68,15 @@ class Clicks:
         self.sound = b2h.clicks(duration,number,interval, self.peak)
         self.number = number
 
+class HarmonicComplex:
+    frequency: b2.Quantity
+    sound: b2h.Sound
 
+    def __init__(
+        self, frequency: b2.Quantity, duration=DEFAULT_SOUND_DURATION, **kwargs
+    ):
+        self.frequency = frequency
+        self.sound = b2h.Sound.harmoniccomplex(frequency, duration, **kwargs)
 
 class ToneFromAngle(Tone):
     # x = ToneFromAngle(20, 20 * b2.Hz)
