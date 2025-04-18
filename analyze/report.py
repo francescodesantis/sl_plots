@@ -317,82 +317,6 @@ def range_around_center(center, radius, min_val=0, max_val=np.iinfo(np.int64).ma
     end = min(max_val + 1, center + radius + 1)
     return np.arange(start, end)
 
-# def draw_ITD_ILD(data):
-#     previous_level = logger.level
-#     # itd and ild functions are VERY verbose
-#     tone: Tone = data["basesound"]
-#     angle_to_ild = {}
-#     angle_to_itd = {}
-#     angles = list(data["angle_to_rate"].keys())
-#     coc = data["conf"]["cochlea_type"]
-#     angle_to_hrtfed_sound = data.get("angle_to_hrtfed_sound", None)
-#     if coc != "ppg":
-#         logger.debug(
-#             f"used cochlea {coc}, with parameters {
-#                 data["conf"]["parameters"]["cochlea"][coc]["hrtf_params"]
-#             }"
-#         )
-#         for angle in angles:
-#             if angle_to_hrtfed_sound is None:
-#                 logger.info(
-#                     "old result file, does not include HRTFed sounds. Generating (beware of possible differences)..."
-#                 )
-#                 binaural_sound = run_hrtf(
-#                     tone,
-#                     angle,
-#                     data["conf"]["parameters"]["cochlea"][coc]["hrtf_params"],
-#                 )
-#                 left = binaural_sound.left
-#                 right = binaural_sound.right
-#             else:
-#                 left, right = (
-#                     angle_to_hrtfed_sound[angle]["left"],
-#                     angle_to_hrtfed_sound[angle]["right"],
-#                 )
-#             logger.setLevel(logging.WARNING)
-#             angle_to_itd[angle] = SA.itd(left, right)
-#             ild_res, all_freq_diff = SA.ild(left, right, tone.sound)
-#             logger.setLevel(logging.DEBUG)
-#             angle_to_ild[angle] = ild_res
-
-#             # total_diff = np.sum(all_freq_diff)
-#     else:
-#         angle_to_itd = {angle: synthetic_angle_to_itd(angle) for angle in angles}
-#         angle_to_ild = {angle: 0 for angle in angles}
-
-#     fig, ild = plt.subplots(1, sharex=True, figsize=(10, 2.3))
-#     fig.suptitle(
-#         f"diff = RMS(left)-RMS(right), freq={tone.frequency}"
-#         # f"diff = max(|spectrum(left)|)-max(|spectrum(right)|), freq={tone.frequency}"
-#     )
-
-#     ild.set_ylabel("Level diff (dB)", color="r")
-#     ild.plot(
-#         angles,
-#         [angle_to_ild[angle] for angle in angles],
-#         label="ILD",
-#         marker=".",
-#         color="r",
-#     )
-#     ild.tick_params(axis="y", labelcolor="r")
-#     itd = ild.twinx()
-#     itd.set_ylabel("seconds", color="b")
-#     itd.plot(
-#         angles,
-#         [angle_to_itd[angle] for angle in angles],
-#         label="ITD",
-#         marker=".",
-#         color="b",
-#     )
-#     itd.tick_params(axis="y", labelcolor="b")
-#     _ = fig.legend()
-
-#     fig.tight_layout()
-#     # plt.subplots_adjust(hspace=0.6, wspace=1)
-#     plt.setp([ild, itd], xticks=angles)
-#     logger.setLevel(previous_level)
-#     return fig
-
 def calculate_vector_strength_from_result(
         # result file (loaded)
         res,
@@ -561,6 +485,7 @@ def calculate_vector_strength_from_result(
     ax.spines['top'].set_visible(False)
     plt.show()
     return (vs, fig)
+
 def calculate_vector_strength_from_result_polar(
         res,
         angle,
@@ -1115,6 +1040,7 @@ def draw_rate_vs_angle(
         ax[i].set_title(pop)
         ax[i].plot(angles, plotted_rate["R"], 'o-', color = 'g')
         ax[i].set_ylabel("Avg Fring Rate [Hz]" if rate else "Population Firing Rate")
+        ax[i].set_xlabel("Azimuth Angle")
         ax[i].set_ylim(ylim)
         ax[i].set_xticks(angles)
         ax[i].set_xticklabels([f"{j}°" for j in angle_to_rate.keys()])
@@ -1142,7 +1068,6 @@ def draw_rate_vs_angle(
                 logscale=hist_logscale,
             )    
 
-    plt.suptitle(title)
     plt.tight_layout()
     plt.show()
     return
@@ -1244,6 +1169,7 @@ def draw_rate_vs_angle_pop(
     else:
         tot_spikes = {}
         active_neuron_rate = {}
+        cluster_numerosity = {}
         for side in sides:
             tot_spikes[side] = []
             active_neuron_rate[side] = []
@@ -1251,22 +1177,24 @@ def draw_rate_vs_angle_pop(
                 # Find indices in CF array corresponding to interval bounds
                 _, ymin_idx = take_closest(cf, cf_interval[0]*Hz)
                 _, ymax_idx = take_closest(cf, cf_interval[1]*Hz)
-                
+
                 # Calculate actual neuron IDs from global_ids and indices
                 base_id = angle_to_rate[angle][side][pop]["global_ids"][0]
                 ymin = base_id + ymin_idx
                 ymax = base_id + ymax_idx
-                
+
                 # Filter spikes within the specified range
                 cluster_mask = (angle_to_rate[angle][side][pop]['senders'] >= ymin) & (angle_to_rate[angle][side][pop]['senders'] <= ymax)
                 cluster_times = angle_to_rate[angle][side][pop]['times'][cluster_mask]
-                
+
                 # Calculate rate for this angle and side
                 tot_spikes[side].append(len(cluster_times) / duration)
-                active_neuron_rate[side].append(len(cluster_times)/((ymax-ymin)*duration))
+                active_neuron_rate[side].append(len(cluster_times)/((ymax - ymin)*duration))
 
-
-       
+                # NEW: Compute cluster numerosity (unique senders)
+                unique_senders = np.unique(angle_to_rate[angle][side][pop]['senders'][cluster_mask])
+            cluster_numerosity[side] = len(unique_senders)
+            print(f"side {side}, considered {cluster_numerosity[side]} cells of {num_neurons} total")
 
     fig, ax = plt.subplots(figsize=figsize)
 # Plot based on the mode:
@@ -1292,6 +1220,7 @@ def draw_rate_vs_angle_pop(
         raise ValueError("Unknown mode. Use 'default' or 'diff'.")
 
     ax.set_xticks(angles)
+    ax.set_xlabel("Azimuth Angle")
     ax.set_xticklabels([f"{j}°" for j in angle_to_rate.keys()])
 
     if show_hist:
@@ -1317,5 +1246,5 @@ def draw_rate_vs_angle_pop(
 
     plt.tight_layout()
     plt.show()
-    return
+    return 
 
