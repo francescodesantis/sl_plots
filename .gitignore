@@ -1,3 +1,5 @@
 secrets
 hears_env_linux
 **/__pycache__/
+# Python cpython bytecode files
+*.cpython-*.pyc
