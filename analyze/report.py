@@ -1373,3 +1373,207 @@ def plot_cf_intervals_grid(data, intervals, pop='MSO', rate=False):
     
     plt.tight_layout()
     plt.show()
+
+def plot_tonotopic_heatmaps(
+    data,
+    pop='LSO',
+    num_cells_per_interval=50,
+    title=None,
+    figsize=(18, 12),
+    cmap='viridis',
+    diff_cmap='coolwarm',
+    y_axis='cf',
+    f_ticks=None,
+):
+    """
+    Generates three heatmaps for auditory neural responses: left-side rates, 
+    right-side rates, and their difference, across angles and frequency bands.
+    
+    Parameters:
+    -----------
+    data : dict
+        Dictionary containing simulation data with angle_to_rate information
+    pop : str, default='LSO'
+        Population name to analyze (e.g., 'LSO', 'MSO')
+    num_cells_per_interval : int, default=50
+        Number of cells to include in each frequency interval
+    title : str, optional
+        Overall title for the plot
+    figsize : tuple, default=(18, 12)
+        Figure size (width, height) in inches
+    cmap : str, default='viridis'
+        Colormap for the left and right heatmaps
+    diff_cmap : str, default='coolwarm'
+        Colormap for the difference heatmap (should be diverging)
+    y_axis : str, default='cf'
+        Type of y-axis to display: 'cf' for characteristic frequency or 'cells' for cell numbers
+    f_ticks : list, optional
+        List of frequency values to display as ticks
+        
+    Returns:
+    --------
+    fig : matplotlib Figure
+        The generated figure with three heatmaps
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    
+    # Extract required data
+    angle_to_rate = data["angle_to_rate"]
+    duration = (data.get("simulation_time", data["basesound"].sound.duration / b2.ms) * b2.ms)
+    angles = list(angle_to_rate.keys())
+    sides = ["L", "R"]
+    
+    # Get total number of neurons
+    num_neurons = len(angle_to_rate[angles[0]]['L'][pop]["global_ids"])
+    
+    # Generate full CF array using erbspace
+    cf = erbspace(CFMIN, CFMAX, num_neurons)
+    
+    # Calculate number of intervals based on total neurons and interval size
+    num_intervals = num_neurons // num_cells_per_interval
+    if num_neurons % num_cells_per_interval > 0:
+        num_intervals += 1  # Add one more interval for remaining cells
+    
+    # Initialize matrices to store firing rates
+    rate_matrices = {side: np.zeros((num_intervals, len(angles))) for side in sides}
+    
+    # Store characteristic frequencies for each interval
+    cf_ids = np.zeros(num_intervals)
+    
+    # Calculate the base neuron ID for each side
+    base_ids = {
+        side: angle_to_rate[angles[0]][side][pop]["global_ids"][0]
+        for side in sides
+    }
+    
+    # Calculate firing rates for each interval and angle
+    for side in sides:
+        neuron_to_cf = {global_id: freq for global_id, freq in zip(angle_to_rate[0][side][pop]["global_ids"], cf)}
+        for i in range(num_intervals):
+            # Define the range of neurons for this interval
+            start_idx = i * num_cells_per_interval
+            end_idx = min((i + 1) * num_cells_per_interval, num_neurons)
+            
+            # Calculate actual neuron IDs
+            ymin = base_ids[side] + start_idx
+            ymax = base_ids[side] + end_idx - 1  # -1 because end_idx is exclusive
+            
+            # Calculate central neuron ID and its characteristic frequency
+            ycentral = int((ymin + ymax)/2)
+            cf_ids[i] = neuron_to_cf[ycentral]
+            
+            for j, angle in enumerate(angles):
+                # Filter spikes within the specified range
+                cluster_mask = (
+                    (angle_to_rate[angle][side][pop]['senders'] >= ymin) & 
+                    (angle_to_rate[angle][side][pop]['senders'] <= ymax)
+                )
+                cluster_times = angle_to_rate[angle][side][pop]['times'][cluster_mask]
+                
+                # Calculate average firing rate for this interval and angle
+                # (Number of spikes divided by duration and number of cells)
+                num_cells = end_idx - start_idx
+                firing_rate = len(cluster_times) / (duration * num_cells)
+                rate_matrices[side][i, j] = firing_rate
+        
+    
+    # Normalize each row by its maximum value
+    for side in sides:
+        for i in range(num_intervals):
+            max_val = np.max(rate_matrices[side][i, :])
+            if max_val > 0:  # Avoid division by zero
+                rate_matrices[side][i, :] = rate_matrices[side][i, :] / max_val
+    
+    # Calculate difference matrix (L - R)
+    diff_matrix = rate_matrices['L'] - rate_matrices['R']
+    
+    # Create figure and subplots
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    
+    # Generate heatmaps using the specified colormap
+    im_left = axes[0].imshow(rate_matrices['L'], cmap=cmap, aspect='auto', interpolation='none')
+    im_right = axes[1].imshow(rate_matrices['R'], cmap=cmap, aspect='auto', interpolation='none')
+    
+    # For difference heatmap, use a diverging colormap centered at zero
+    vmax = max(abs(np.min(diff_matrix)), abs(np.max(diff_matrix)))
+    norm = Normalize(vmin=-vmax, vmax=vmax)
+    im_diff = axes[2].imshow(diff_matrix, cmap=diff_cmap, aspect='auto', 
+                             interpolation='none', norm=norm)
+    
+    # Add colorbars
+    cbar_left = plt.colorbar(im_left, ax=axes[0])
+    cbar_right = plt.colorbar(im_right, ax=axes[1])
+    cbar_diff = plt.colorbar(im_diff, ax=axes[2])
+    
+    cbar_left.set_label('Normalized Firing Rate')
+    cbar_right.set_label('Normalized Firing Rate')
+    cbar_diff.set_label('Difference (L - R)')
+    
+    # Set titles
+    axes[0].set_title('Left Side')
+    axes[1].set_title('Right Side')
+    axes[2].set_title('Difference (Left - Right)')
+    
+    # Set overall title if provided
+    if title:
+        fig.suptitle(title, fontsize=16)
+    
+    # Set x-axis labels (angles)
+    for ax in axes:
+        ax.set_xticks(np.arange(len(angles)))
+        ax.set_xticklabels([f"{angle}°" for angle in angles])
+        ax.set_xlabel('Azimuth Angle')
+    
+    # Set y-ticks and labels for all axes based on y_axis parameter
+    for ax in axes:
+        ax.set_yticks(np.arange(num_intervals))
+        
+        if y_axis == 'cf':
+            # Format frequency labels: integers for < 1000, one decimal with 'k' for ≥ 1000
+            freq_labels = []
+            for freq in cf_ids:
+                if freq < 1000:
+                    freq_labels.append(f"{int(round(freq))} Hz")
+                else:
+                    # Convert to kHz with one decimal place
+                    freq_labels.append(f"{freq/1000:.1f}k Hz")
+            
+            ax.set_yticklabels(freq_labels)
+            ax.set_ylabel('Characteristic Frequency')
+        else:  # y_axis == 'cells'
+            # Show cell number ranges
+            cell_labels = []
+            for i in range(num_intervals):
+                start_idx = i * num_cells_per_interval
+                end_idx = min((i + 1) * num_cells_per_interval, num_neurons) - 1
+                cell_labels.append(f"{start_idx}-{end_idx}")
+            
+            ax.set_yticklabels(cell_labels)
+            ax.set_ylabel('Cell Indices')
+
+        ax.invert_yaxis()  # Ensure low frequencies are at the bottom
+    
+
+    # Highlight specific frequency ticks if provided
+    if f_ticks is not None and y_axis == 'cf':
+        for ax in axes:
+            # Find the indices of intervals whose CF is closest to the specified frequencies
+            label_indices = []
+            for f in f_ticks:
+                # Find the interval with CF closest to the requested frequency
+                distances = np.abs(cf_ids - f)
+                closest_idx = np.argmin(distances)
+                label_indices.append(closest_idx)
+                
+                # Highlight the corresponding tick
+                if 0 <= closest_idx < num_intervals:
+                    ax.get_yticklabels()[closest_idx].set_weight('bold')
+    
+    # Adjust layout
+    plt.tight_layout()
+    if title:
+        plt.subplots_adjust(top=0.9)  # Make room for the overall title
+    
+    return fig
