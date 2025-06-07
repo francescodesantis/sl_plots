@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from sorcery import dict_of
+from matplotlib.colors import Normalize
+    
 
 # from analyze import sound_analysis as SA
 # from cochleas.hrtf_utils import run_hrtf
@@ -1124,6 +1126,228 @@ def draw_psth_pop(
     plt.show()
     return
 
+def calculate_firing_rates(angle_to_rate, pop, sides, angles, duration, cf_interval=None):
+    """
+    Calculate firing rates for different sides and angles.
+    
+    Parameters:
+    - angle_to_rate: Dictionary mapping angles to rate data
+    - pop: Population name (e.g., 'LSO')
+    - sides: List of sides ('L', 'R', or both)
+    - angles: List of angles to process
+    - duration: Duration of the simulation
+    - cf_interval: Optional frequency interval for filtering
+    
+    Returns:
+    - tot_spikes: Dictionary of total spike rates by side
+    - active_neuron_rate: Dictionary of active neuron rates by side
+    """
+    
+    # Get frequency space
+    num_neurons = len(angle_to_rate[0]['L'][pop]["global_ids"])
+    cf = erbspace(CFMIN, CFMAX, num_neurons)
+    
+    if cf_interval is None:
+        # Simple case - use all neurons
+        tot_spikes = {
+            side: [
+                len(angle_to_rate[angle][side][pop]["times"]) / duration
+                for angle in angles
+            ]
+            for side in sides
+        }
+        avg_neuron_rate = {
+            side: [
+                len(angle_to_rate[angle][side][pop]["times"]) / (duration*num_neurons)
+                for angle in angles
+            ]
+            for side in sides
+        }
+
+        active_neuron_rate = {
+            side: [
+                avg_fire_rate_actv_neurons(angle_to_rate[angle][side][pop])
+                * (1 * b2.second)
+                / duration
+                for angle in angles
+            ]
+            for side in sides
+        }
+        return tot_spikes, avg_neuron_rate, active_neuron_rate
+    
+    # Case with CF interval filtering
+    tot_spikes = {}
+    avg_neuron_rate = {}
+    cluster_numerosity = {}
+    
+    
+    for side in sides:
+        tot_spikes[side] = []
+        avg_neuron_rate[side] = []
+        
+        for angle in angles:
+            # Find indices in CF array corresponding to interval bounds
+            _, ymin_idx = take_closest(cf, cf_interval[0]*Hz)
+            _, ymax_idx = take_closest(cf, cf_interval[1]*Hz)
+
+            # Calculate actual neuron IDs from global_ids and indices
+            base_id = angle_to_rate[angle][side][pop]["global_ids"][0]
+            ymin = base_id + ymin_idx
+            ymax = base_id + ymax_idx
+
+            # Filter spikes within the specified range
+            cluster_mask = (angle_to_rate[angle][side][pop]['senders'] >= ymin) & (angle_to_rate[angle][side][pop]['senders'] <= ymax)
+            cluster_times = angle_to_rate[angle][side][pop]['times'][cluster_mask]
+
+            # Calculate rate for this angle and side
+            tot_spikes[side].append(len(cluster_times) / duration)
+            avg_neuron_rate[side].append(len(cluster_times)/((ymax - ymin)*duration))
+
+            # Compute cluster numerosity (unique senders)
+            unique_senders = np.unique(angle_to_rate[angle][side][pop]['senders'][cluster_mask])
+        
+        cluster_numerosity[side] = len(unique_senders)
+    
+    return tot_spikes, avg_neuron_rate, avg_neuron_rate #unique set not computed for a cf_interval
+
+def normalize_rates(plotted_rate, sides):
+    """
+    Normalize firing rates using min-max normalization.
+    
+    Parameters:
+    - plotted_rate: Dictionary of firing rates by side
+    - sides: List of sides to process
+    
+    Returns:
+    - normalized_rate: Dictionary of normalized firing rates by side
+    - original_values: Dictionary containing original min/max values and their indices
+    """
+    normalized_rate = {side: [] for side in sides}
+    original_values = {}
+    
+    for side in sides:
+        # Find the minimum and maximum values across all angles for this side
+        min_value = min(plotted_rate[side])
+        max_value = max(plotted_rate[side])
+        
+        # Store original min/max values before normalization
+        original_values[side] = {
+            'min_value': min_value,
+            'max_value': max_value,
+            'min_angle_idx': plotted_rate[side].index(min_value),
+            'max_angle_idx': plotted_rate[side].index(max_value)
+        }
+        
+        # Avoid division by zero - check if max and min are different
+        if max_value > min_value:  
+            # Apply min-max normalization: (x - min) / (max - min)
+            normalized_rate[side] = [(val - min_value) / (max_value - min_value) for val in plotted_rate[side]]
+        else:
+            # If all values are the same, set normalized values to 0.5
+            normalized_rate[side] = [0.5 for _ in plotted_rate[side]]
+    
+    return normalized_rate, original_values
+
+def add_rate_annotations(ax, original_values, normalized_rates, angles, sides, side_colors):
+    """
+    Add annotations showing original rate values at min/max points.
+    
+    Parameters:
+    - ax: Matplotlib axis to plot on
+    - original_values: Dictionary with original min/max values and indices
+    - normalized_rates: Dictionary of normalized rates by side
+    - angles: List of angles
+    - sides: List of sides
+    - side_colors: Dictionary mapping sides to colors
+    """
+    # Get current axis limits to avoid placing annotations outside visible area
+    xmin, xmax = ax.get_xlim()
+    ymin, ymax = ax.get_ylim()
+    y_margin = (ymax - ymin) * 0.05  # 5% margin from top/bottom
+    
+    # Track used positions to avoid overlaps
+    used_positions = {}
+    
+    for side_idx, side in enumerate(sides):
+        min_value = original_values[side]['min_value']/Hz
+        max_value = original_values[side]['max_value']/Hz
+        min_angle_idx = original_values[side]['min_angle_idx']
+        max_angle_idx = original_values[side]['max_angle_idx']
+        
+        # Format values as Hz or kHz
+        if max_value < 1000:
+            max_text = f"{max_value:.2f} Hz"
+        else:
+            max_text = f"{max_value/1000:.2f} kHz"
+            
+        if min_value < 1000:
+            min_text = f"{min_value:.2f} Hz"
+        else:
+            min_text = f"{min_value/1000:.2f} kHz"
+        
+        # Calculate positions to avoid overlapping
+        min_x = angles[min_angle_idx]
+        min_y = normalized_rates[side][min_angle_idx]
+        max_x = angles[max_angle_idx]
+        max_y = normalized_rates[side][max_angle_idx]
+        
+        # Offset for max annotation - try to position near the top of the plot
+        # but avoid overlapping with other annotations
+        max_y_pos = max_y
+        max_offset_y = 15 + (side_idx * 15)  # Vertical offset increases with each side
+        
+        # Check if we're close to another annotation
+        position_key = f"{max_x}_{max_y}"
+        if position_key in used_positions:
+            # Adjust the offset to avoid overlap
+            max_offset_y += 15
+        used_positions[position_key] = True
+        
+        # For min annotation, position below the point
+        min_y_pos = min_y
+        min_offset_y = -15 - (side_idx * 15)  # Vertical offset decreases with each side
+        
+        # Check if we're close to another annotation
+        position_key = f"{min_x}_{min_y}"
+        if position_key in used_positions:
+            # Adjust the offset to avoid overlap
+            min_offset_y -= 15
+        used_positions[position_key] = True
+        
+        # Ensure annotations are within plot boundaries
+        if max_y + max_offset_y/72 > ymax - y_margin:
+            # If annotation would be outside top, place it below the point instead
+            max_offset_y = -15
+        
+        if min_y + min_offset_y/72 < ymin + y_margin:
+            # If annotation would be outside bottom, place it above the point instead
+            min_offset_y = 15
+            
+        # Add annotations (text only, no boxes)
+        ax.annotate(
+            max_text,
+            (max_x, max_y),
+            xytext=(10, max_offset_y),
+            textcoords='offset points',
+            color=side_colors[side],
+            fontsize=9,
+            fontweight='bold',
+            horizontalalignment='left',
+            verticalalignment='center'
+        )
+        
+        ax.annotate(
+            min_text,
+            (min_x, min_y),
+            xytext=(10, min_offset_y),
+            textcoords='offset points',
+            color=side_colors[side],
+            fontsize=9,
+            fontweight='bold',
+            horizontalalignment='left',
+            verticalalignment='center'
+        )
+
 def draw_rate_vs_angle_pop(
     data,
     title=None,
@@ -1131,12 +1355,34 @@ def draw_rate_vs_angle_pop(
     rate=True,
     cf_interval=None,
     sides=None,
-    color = None,
-    norm = False,
+    color=None,
+    norm=False,
     figsize=[7, 4],
     ax=None,  
     ylim=None,
+    label=None,
 ):
+    """
+    Draw firing rate vs angle plot for neural populations.
+    
+    Parameters:
+    - data: Dictionary containing angle_to_rate data
+    - title: Optional plot title
+    - pop: Population name (default: 'LSO')
+    - rate: If True, use avg firing rate; otherwise, use population firing rate
+    - cf_interval: Optional characteristic frequency interval
+    - sides: List of sides ('L', 'R', or both)
+    - color: Color to use for the plot
+    - norm: If True, normalize the rates
+    - figsize: Figure size (default: [7, 4])
+    - ax: Optional matplotlib axis to plot on
+    - ylim: Optional y-axis limits
+    - label: Optional custom label for the legend
+    
+    Returns:
+    - ax: The matplotlib axis with the plot
+    - original_values: Dictionary with original rate values if normalization was applied
+    """
     angle_to_rate = data["angle_to_rate"]
     duration = (data.get("simulation_time", data["basesound"].sound.duration / b2.ms) * b2.ms)
     angles = list(angle_to_rate.keys())
@@ -1153,56 +1399,10 @@ def draw_rate_vs_angle_pop(
         else:
             side_colors = {sides[0]: 'm'}  # Default color if none provided
     
-    num_neurons = len(angle_to_rate[0]['L'][pop]["global_ids"])
-    cf = erbspace(CFMIN, CFMAX, num_neurons)
-
-    if cf_interval == None:
-        tot_spikes = {
-            side: [
-                len(angle_to_rate[angle][side][pop]["times"]) / duration
-                for angle in angles
-            ]
-            for side in sides
-        }
-        active_neuron_rate = {
-            side: [
-                avg_fire_rate_actv_neurons(angle_to_rate[angle][side][pop])
-                * (1 * b2.second)
-                / duration
-                for angle in angles
-            ]
-            for side in sides
-        }
-
-    else:
-        tot_spikes = {}
-        active_neuron_rate = {}
-        cluster_numerosity = {}
-        for side in sides:
-            tot_spikes[side] = []
-            active_neuron_rate[side] = []
-            for angle in angles:
-                # Find indices in CF array corresponding to interval bounds
-                _, ymin_idx = take_closest(cf, cf_interval[0]*Hz)
-                _, ymax_idx = take_closest(cf, cf_interval[1]*Hz)
-
-                # Calculate actual neuron IDs from global_ids and indices
-                base_id = angle_to_rate[angle][side][pop]["global_ids"][0]
-                ymin = base_id + ymin_idx
-                ymax = base_id + ymax_idx
-
-                # Filter spikes within the specified range
-                cluster_mask = (angle_to_rate[angle][side][pop]['senders'] >= ymin) & (angle_to_rate[angle][side][pop]['senders'] <= ymax)
-                cluster_times = angle_to_rate[angle][side][pop]['times'][cluster_mask]
-
-                # Calculate rate for this angle and side
-                tot_spikes[side].append(len(cluster_times) / duration)
-                active_neuron_rate[side].append(len(cluster_times)/((ymax - ymin)*duration))
-
-                # NEW: Compute cluster numerosity (unique senders)
-                unique_senders = np.unique(angle_to_rate[angle][side][pop]['senders'][cluster_mask])
-            cluster_numerosity[side] = len(unique_senders)
-            #print(f"side {side}, considered {cluster_numerosity[side]} cells of {num_neurons} total")
+    # Calculate firing rates
+    tot_spikes, avg_neuron_rate, active_neuron_rate = calculate_firing_rates(
+        angle_to_rate, pop, sides, angles, duration, cf_interval
+    )
 
     # Create a new figure if no axis is provided
     if ax is None:
@@ -1211,27 +1411,28 @@ def draw_rate_vs_angle_pop(
     else:
         created_fig = False
 
-    plotted_rate = active_neuron_rate if rate else tot_spikes
+    # Select which rate metric to plot
+    plotted_rate = avg_neuron_rate if rate else tot_spikes
+    
     # Apply normalization if requested
+    original_values = None
     if norm:
-        for side in sides:
-            # Find the maximum value across all angles for this side
-            max_value = max(plotted_rate[side])
-            if max_value > 0:  # Avoid division by zero
-                # Normalize all values by the maximum
-                plotted_rate[side] = [val / max_value for val in plotted_rate[side]]
+        plotted_rate, original_values = normalize_rates(plotted_rate, sides)
     
+    # Plot the data
     for side in sides:
-        ax.plot(angles, plotted_rate[side], 'o-', color=side_colors[side], label=f"Side {side}")
+        # Use custom label if provided, otherwise use default
+        line_label = label if label is not None else f"Side {side}"
+        ax.plot(angles, plotted_rate[side], 'o-', color=side_colors[side], label=line_label)
     
-    # Update ylabel based on normalization
+    # Set labels and formatting
     if norm:
         ylabel_text = "Normalized Avg Firing Rate" if rate else "Normalized Pop Firing Rate"
     else:
         ylabel_text = "Avg Firing Rate [Hz]" if rate else "Pop Firing Rate [Hz]"
 
     ax.set_ylabel(ylabel_text)
-    if len(sides) > 1:  # Only show legend if more than one side
+    if len(sides) > 1 and label is None:  # Only show default legend if more than one side and no custom label
         ax.legend()
 
     ax.set_xticks(angles)
@@ -1248,7 +1449,7 @@ def draw_rate_vs_angle_pop(
         plt.tight_layout()
         plt.show()
         
-    return ax
+    return ax, original_values if norm else ax
 
 def draw_rate_vs_angle_comparison(
     data1,
@@ -1378,16 +1579,18 @@ def plot_tonotopic_heatmaps(
     data,
     pop='LSO',
     num_cells_per_interval=50,
+    row_norm = True,
     title=None,
     figsize=(18, 12),
     cmap='viridis',
     diff_cmap='coolwarm',
+    vmax_given=None,
     y_axis='cf',
     f_ticks=None,
+    show_sides=True
 ):
     """
-    Generates three heatmaps for auditory neural responses: left-side rates, 
-    right-side rates, and their difference, across angles and frequency bands.
+    Generates heatmaps for auditory neural responses across angles and frequency bands.
     
     Parameters:
     -----------
@@ -1405,20 +1608,20 @@ def plot_tonotopic_heatmaps(
         Colormap for the left and right heatmaps
     diff_cmap : str, default='coolwarm'
         Colormap for the difference heatmap (should be diverging)
+    vmax_given : float, optional
+        Maximum value for difference colormap normalization
     y_axis : str, default='cf'
         Type of y-axis to display: 'cf' for characteristic frequency or 'cells' for cell numbers
     f_ticks : list, optional
-        List of frequency values to display as ticks
+        List of frequency values to display as ticks (if provided, only these ticks will be shown)
+    show_sides : bool, default=True
+        Whether to show individual left/right heatmaps along with difference map
         
     Returns:
     --------
     fig : matplotlib Figure
-        The generated figure with three heatmaps
+        The generated figure with heatmaps
     """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import Normalize
-    
     # Extract required data
     angle_to_rate = data["angle_to_rate"]
     duration = (data.get("simulation_time", data["basesound"].sound.duration / b2.ms) * b2.ms)
@@ -1473,107 +1676,138 @@ def plot_tonotopic_heatmaps(
                 cluster_times = angle_to_rate[angle][side][pop]['times'][cluster_mask]
                 
                 # Calculate average firing rate for this interval and angle
-                # (Number of spikes divided by duration and number of cells)
                 num_cells = end_idx - start_idx
                 firing_rate = len(cluster_times) / (duration * num_cells)
                 rate_matrices[side][i, j] = firing_rate
-        
     
     # Normalize each row by its maximum value
-    for side in sides:
-        for i in range(num_intervals):
-            max_val = np.max(rate_matrices[side][i, :])
-            if max_val > 0:  # Avoid division by zero
-                rate_matrices[side][i, :] = rate_matrices[side][i, :] / max_val
+    if(row_norm):
+        for side in sides:
+            for i in range(num_intervals):
+                max_val = np.max(rate_matrices[side][i, :])
+                if max_val > 0:  # Avoid division by zero
+                    rate_matrices[side][i, :] = rate_matrices[side][i, :] / max_val
     
     # Calculate difference matrix (L - R)
     diff_matrix = rate_matrices['L'] - rate_matrices['R']
     
-    # Create figure and subplots
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
-    
-    # Generate heatmaps using the specified colormap
-    im_left = axes[0].imshow(rate_matrices['L'], cmap=cmap, aspect='auto', interpolation='none')
-    im_right = axes[1].imshow(rate_matrices['R'], cmap=cmap, aspect='auto', interpolation='none')
+    # Create figure based on display mode
+    if show_sides:
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
+        
+        # Generate side heatmaps
+        im_left = axes[0].imshow(rate_matrices['L'], cmap=cmap, aspect='auto', interpolation='none')
+        im_right = axes[1].imshow(rate_matrices['R'], cmap=cmap, aspect='auto', interpolation='none')
+        
+        # Add colorbars for side plots
+        cbar_left = plt.colorbar(im_left, ax=axes[0])
+        cbar_right = plt.colorbar(im_right, ax=axes[1])
+        if(row_norm):
+            cbar_left.set_label('Normalized Firing Rate')
+            cbar_right.set_label('Normalized Firing Rate')
+        else:
+            cbar_left.set_label('Firing Rate')
+            cbar_right.set_label('Firing Rate')
+        
+        # Set titles for side plots
+        axes[0].set_title('Left Side')
+        axes[1].set_title('Right Side')
+        
+        # Set up diff plot (ax=axes[2])
+        diff_ax = axes[2]
+        diff_ax.set_title('Difference (Left - Right)')
+    else:
+        fig, diff_ax = plt.subplots(1, figsize=figsize)
     
     # For difference heatmap, use a diverging colormap centered at zero
     vmax = max(abs(np.min(diff_matrix)), abs(np.max(diff_matrix)))
+    print('previously vmax set at ', vmax)
+    if vmax_given is not None and vmax_given >= vmax:
+        vmax = vmax_given
+        print('now vmax set at ', vmax)
     norm = Normalize(vmin=-vmax, vmax=vmax)
-    im_diff = axes[2].imshow(diff_matrix, cmap=diff_cmap, aspect='auto', 
-                             interpolation='none', norm=norm)
     
-    # Add colorbars
-    cbar_left = plt.colorbar(im_left, ax=axes[0])
-    cbar_right = plt.colorbar(im_right, ax=axes[1])
-    cbar_diff = plt.colorbar(im_diff, ax=axes[2])
-    
-    cbar_left.set_label('Normalized Firing Rate')
-    cbar_right.set_label('Normalized Firing Rate')
+    # Create difference heatmap
+    im_diff = diff_ax.imshow(diff_matrix, cmap=diff_cmap, aspect='auto', 
+                       interpolation='none', norm=norm)
+    cbar_diff = plt.colorbar(im_diff, ax=diff_ax)
     cbar_diff.set_label('Difference (L - R)')
     
-    # Set titles
-    axes[0].set_title('Left Side')
-    axes[1].set_title('Right Side')
-    axes[2].set_title('Difference (Left - Right)')
-    
-    # Set overall title if provided
-    if title:
-        fig.suptitle(title, fontsize=16)
-    
-    # Set x-axis labels (angles)
-    for ax in axes:
+    # Define function to set up axes formatting
+    def setup_axis(ax):
+        # Set x-axis labels (angles)
         ax.set_xticks(np.arange(len(angles)))
         ax.set_xticklabels([f"{angle}°" for angle in angles])
         ax.set_xlabel('Azimuth Angle')
-    
-    # Set y-ticks and labels for all axes based on y_axis parameter
-    for ax in axes:
-        ax.set_yticks(np.arange(num_intervals))
         
-        if y_axis == 'cf':
-            # Format frequency labels: integers for < 1000, one decimal with 'k' for ≥ 1000
-            freq_labels = []
-            for freq in cf_ids:
-                if freq < 1000:
-                    freq_labels.append(f"{int(round(freq))} Hz")
-                else:
-                    # Convert to kHz with one decimal place
-                    freq_labels.append(f"{freq/1000:.1f}k Hz")
+        # Set y-axis formatting
+        if f_ticks is not None and y_axis == 'cf':
+            # Use only the specified frequency ticks
+            y_positions = []
+            y_labels = []
             
-            ax.set_yticklabels(freq_labels)
-            ax.set_ylabel('Characteristic Frequency')
-        else:  # y_axis == 'cells'
-            # Show cell number ranges
-            cell_labels = []
-            for i in range(num_intervals):
-                start_idx = i * num_cells_per_interval
-                end_idx = min((i + 1) * num_cells_per_interval, num_neurons) - 1
-                cell_labels.append(f"{start_idx}-{end_idx}")
-            
-            ax.set_yticklabels(cell_labels)
-            ax.set_ylabel('Cell Indices')
+            # Add fixed 20 Hz tick at the bottom edge (not centered)
+            y_positions.append(num_intervals - 0.5)  # Bottom edge
+            y_labels.append("20 kHz")
 
+            # Add fixed 20 kHz tick at the top edge (not centered)
+            y_positions.append(-0.5)  # Top edge
+            y_labels.append("20 Hz")
+
+            for freq in f_ticks:
+                # Format frequency label
+                if freq < 1000:
+                    label = f"{int(round(freq))} Hz"
+                else:
+                    label = f"{int(freq/1000)} kHz"
+                
+                # Find approximate position (closest interval) for this frequency
+                distances = np.abs(cf_ids - freq)
+                closest_idx = np.argmin(distances)
+                
+                y_positions.append(closest_idx)
+                y_labels.append(label)
+            
+            ax.set_yticks(y_positions)
+            ax.set_yticklabels(y_labels)
+        else:
+            # Show all intervals
+            ax.set_yticks(np.arange(num_intervals))
+            
+            if y_axis == 'cf':
+                # Format frequency labels
+                freq_labels = []
+                for freq in cf_ids:
+                    if freq < 1000:
+                        freq_labels.append(f"{int(round(freq))} Hz")
+                    else:
+                        freq_labels.append(f"{freq/1000:.1f}k Hz")
+                
+                ax.set_yticklabels(freq_labels)
+            else:  # y_axis == 'cells'
+                # Show cell number ranges
+                cell_labels = []
+                for i in range(num_intervals):
+                    start_idx = i * num_cells_per_interval
+                    end_idx = min((i + 1) * num_cells_per_interval, num_neurons) - 1
+                    cell_labels.append(f"{start_idx}-{end_idx}")
+                
+                ax.set_yticklabels(cell_labels)
+        
+        ax.set_ylabel('Characteristic Frequency' if y_axis == 'cf' else 'Cell Indices')
         ax.invert_yaxis()  # Ensure low frequencies are at the bottom
     
-
-    # Highlight specific frequency ticks if provided
-    if f_ticks is not None and y_axis == 'cf':
+    # Apply axis formatting to all axes
+    if show_sides:
         for ax in axes:
-            # Find the indices of intervals whose CF is closest to the specified frequencies
-            label_indices = []
-            for f in f_ticks:
-                # Find the interval with CF closest to the requested frequency
-                distances = np.abs(cf_ids - f)
-                closest_idx = np.argmin(distances)
-                label_indices.append(closest_idx)
-                
-                # Highlight the corresponding tick
-                if 0 <= closest_idx < num_intervals:
-                    ax.get_yticklabels()[closest_idx].set_weight('bold')
+            setup_axis(ax)
+    else:
+        setup_axis(diff_ax)
     
     # Adjust layout
     plt.tight_layout()
     if title:
         plt.subplots_adjust(top=0.9)  # Make room for the overall title
+        fig.suptitle(title, fontsize=16)
     
     return fig
